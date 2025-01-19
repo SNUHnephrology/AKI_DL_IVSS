@@ -1,0 +1,2456 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<PMML version="4.4" xmlns="http://www.dmg.org/PMML-4_4">
+    <Header copyright="DL_IVSS AKI Prediction Model" description="Deep Learning model for AKI prediction from vital signs">
+        <Timestamp>2024-01-18 00:00:00</Timestamp>
+    </Header>
+
+    <DataDictionary numberOfFields="2">
+        <!-- Input tensor for vital signs (SBP, DBP, HR) -->
+        <DataField name="vital_signals" dataType="tensor" optype="continuous">
+            <Array n="2" type="int">3 1479</Array>
+        </DataField>
+        
+        <!-- Output probability for postoperative AKI -->
+        <DataField name="AKI_probability" dataType="double" optype="continuous">
+            <Value value="0" displayValue="No AKI"/>
+            <Value value="1" displayValue="AKI"/>
+        </DataField>
+    </DataDictionary>
+
+    <DeepNetwork modelName="DL_IVSS" functionName="binary_classification" algorithmName="CNN">
+        <MiningSchema>
+            <MiningField name="vital_signals" usageType="active"/>
+            <MiningField name="AKI_probability" usageType="predicted"/>
+        </MiningSchema>
+
+        <Output>
+            <OutputField name="AKI_probability" feature="probability" dataType="double" optype="continuous"/>
+        </Output>
+
+        <!-- Input Layer -->
+        <NetworkLayer layerType="Input" name="input_layer">
+            <InputSize>
+                <Array n="2" type="int">3 1479</Array>
+            </InputSize>
+        </NetworkLayer>
+
+        <!-- Upsampling Layer -->
+        <NetworkLayer layerType="Upsample" name="upsample">
+            <InboundNodes>
+                <Array n="1" type="string">input_layer</Array>
+            </InboundNodes>
+            <ScaleFactor>1.3392857142857142</ScaleFactor>
+            <Mode>bilinear</Mode>
+        </NetworkLayer>
+
+        <!-- Stage 1: Initial Convolution and Batch Normalization -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage1_conv" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">upsample</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="38">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">2</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage1_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage1_conv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 2: SepConv Block -->
+        <NetworkLayer layerType="Sequential" name="stage2_sepconv">
+            
+            <!-- Residual Block -->
+            <NetworkLayer activation="linear" layerType="Conv1D" name="stage2_depthwise" padding="same" use_bias="False" groups="38">
+                <InboundNodes>
+                    <Array n="1" type="string">stage1_bn</Array>
+                </InboundNodes>
+                <ConvolutionalKernel channels="38">
+                    <KernelSize>
+                        <Array n="1" type="int">3</Array>
+                    </KernelSize>
+                    <KernelStride>
+                        <Array n="1" type="int">1</Array>
+                    </KernelStride>
+                </ConvolutionalKernel>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage2_bn1">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_depthwise</Array>
+                </InboundNodes>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="Activation" name="stage2_swish1">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_bn1</Array>
+                </InboundNodes>
+                <Activation>
+                    <Type>swish</Type>
+                </Activation>
+            </NetworkLayer>
+            
+            <!-- SE Block -->
+            <NetworkLayer layerType="GlobalAveragePooling1D" name="stage2_squeeze">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_swish1</Array>
+                </InboundNodes>
+                <OutputSize>1</OutputSize>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="Dense" name="stage2_excitation1" use_bias="True">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_squeeze</Array>
+                </InboundNodes>
+                <Dense>
+                    <InputUnits>38</InputUnits>
+                    <OutputUnits>9</OutputUnits>
+                </Dense>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="Activation" name="stage2_swish2">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_excitation1</Array>
+                </InboundNodes>
+                <Activation>
+                    <Type>swish</Type>
+                </Activation>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="Dense" name="stage2_excitation2" use_bias="True">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_swish2</Array>
+                </InboundNodes>
+                <Dense>
+                    <InputUnits>9</InputUnits>
+                    <OutputUnits>38</OutputUnits>
+                </Dense>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="Activation" name="stage2_sigmoid">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_excitation2</Array>
+                </InboundNodes>
+                <Activation>
+                    <Type>sigmoid</Type>
+                </Activation>
+            </NetworkLayer>
+            
+            <!-- SE Block output multiply with Residual Block output -->
+            <NetworkLayer layerType="Multiply" name="stage2_se_multiply">
+                <InboundNodes>
+                    <Array n="2" type="string">stage2_swish1 stage2_sigmoid</Array>
+                </InboundNodes>
+            </NetworkLayer>
+            
+            <!-- Projection Block -->
+            <NetworkLayer activation="linear" layerType="Conv1D" name="stage2_project" padding="same" use_bias="False">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_se_multiply</Array>
+                </InboundNodes>
+                <ConvolutionalKernel channels="19">
+                    <KernelSize>
+                        <Array n="1" type="int">1</Array>
+                    </KernelSize>
+                    <KernelStride>
+                        <Array n="1" type="int">1</Array>
+                    </KernelStride>
+                </ConvolutionalKernel>
+            </NetworkLayer>
+            
+            <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage2_bn2">
+                <InboundNodes>
+                    <Array n="1" type="string">stage2_project</Array>
+                </InboundNodes>
+            </NetworkLayer>
+        </NetworkLayer>
+
+        <!-- Stage 3 - First MBConv Block -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3a_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage2_bn2</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="114">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">2</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3a_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage3a_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3a_dwconv" padding="same" use_bias="False" groups="114">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="114">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3a_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage3a_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage3a_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage3a_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>114</InputUnits>
+                <OutputUnits>28</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage3a_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage3a_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>28</InputUnits>
+                <OutputUnits>114</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage3a_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage3a_dwconv_swish stage3a_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3a_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="28">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3a_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 3 - Second MBConv Block -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3b_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage3a_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="168">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3b_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_expand</Array>
+            </InboundNodes>
+            </NetworkLayer>
+
+            <NetworkLayer layerType="Activation" name="stage3b_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3b_dwconv" padding="same" use_bias="False" groups="168">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="168">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3b_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage3b_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage3b_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage3b_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>168</InputUnits>
+                <OutputUnits>42</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage3b_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage3b_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>42</InputUnits>
+                <OutputUnits>168</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage3b_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage3b_dwconv_swish stage3b_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage3b_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="28">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage3b_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 4 - First MBConv Block -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4a_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage3b_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="168">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">2</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4a_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4a_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4a_dwconv" padding="same" use_bias="False" groups="168">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="168">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4a_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4a_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage4a_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage4a_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>168</InputUnits>
+                <OutputUnits>42</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4a_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage4a_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>42</InputUnits>
+                <OutputUnits>168</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage4a_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage4a_dwconv_swish stage4a_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4a_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="48">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4a_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 4 - Second MBConv Block -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4b_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage4a_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="288">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4b_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4b_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4b_dwconv" padding="same" use_bias="False" groups="288">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="288">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4b_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4b_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage4b_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage4b_se_reduce" use_bias="True">
+        <InboundNodes>
+                <Array n="1" type="string">stage4b_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>288</InputUnits>
+                <OutputUnits>72</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage4b_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage4b_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>72</InputUnits>
+                <OutputUnits>288</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage4b_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage4b_dwconv_swish stage4b_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage4b_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="48">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage4b_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 5 - First MBConv Block (48 -> 288 -> 96, stride=2) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5a_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage4b_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="288">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">2</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5a_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5a_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5a_dwconv" padding="same" use_bias="False" groups="288">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="288">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5a_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5a_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage5a_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage5a_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>288</InputUnits>
+                <OutputUnits>72</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5a_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage5a_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>72</InputUnits>
+                <OutputUnits>288</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage5a_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage5a_dwconv_swish stage5a_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5a_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="96">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5a_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 5 - Second MBConv Block (96 -> 576 -> 96) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5b_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5a_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5b_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5b_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5b_dwconv" padding="same" use_bias="False" groups="576">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5b_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5b_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage5b_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage5b_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>576</InputUnits>
+                <OutputUnits>144</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5b_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage5b_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>144</InputUnits>
+                <OutputUnits>576</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage5b_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage5b_dwconv_swish stage5b_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5b_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="96">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5b_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+
+        <!-- Stage 5 - Third MBConv Block (96 -> 576 -> 96) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5c_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5b_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5c_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5c_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5c_dwconv" padding="same" use_bias="False" groups="576">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5c_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5c_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage5c_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage5c_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>576</InputUnits>
+                <OutputUnits>144</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5c_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage5c_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>144</InputUnits>
+                <OutputUnits>576</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage5c_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage5c_dwconv_swish stage5c_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5c_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="96">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5c_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+
+
+        <!-- Stage 5 - 4th MBConv Block (96 -> 576 -> 96) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5d_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5c_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5d_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5d_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5d_dwconv" padding="same" use_bias="False" groups="576">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5d_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5d_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage5d_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage5d_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>576</InputUnits>
+                <OutputUnits>144</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage5d_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage5d_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>144</InputUnits>
+                <OutputUnits>576</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage5d_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage5d_dwconv_swish stage5d_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage5d_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="96">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage5d_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 6 - First MBConv Block (96 -> 576 -> 134, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6a_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage5d_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6a_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6a_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6a_dwconv" padding="same" use_bias="False" groups="576">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="576">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6a_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6a_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage6a_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage6a_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>576</InputUnits>
+                <OutputUnits>144</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6a_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage6a_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>144</InputUnits>
+                <OutputUnits>576</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage6a_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage6a_dwconv_swish stage6a_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6a_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="134">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6a_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 6 - Second MBConv Block (134 -> 804 -> 134) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6b_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6a_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6b_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6b_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6b_dwconv" padding="same" use_bias="False" groups="804">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6b_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6b_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage6b_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage6b_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>804</InputUnits>
+                <OutputUnits>201</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6b_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage6b_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>201</InputUnits>
+                <OutputUnits>804</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage6b_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage6b_dwconv_swish stage6b_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6b_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="134">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6b_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 6 - Third MBConv Block (134 -> 804 -> 134) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6c_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6b_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6c_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6c_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6c_dwconv" padding="same" use_bias="False" groups="804">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6c_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6c_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage6c_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage6c_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>804</InputUnits>
+                <OutputUnits>201</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6c_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage6c_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>201</InputUnits>
+                <OutputUnits>804</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage6c_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage6c_dwconv_swish stage6c_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6c_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="134">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6c_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 6 - Fourth MBConv Block (134 -> 804 -> 134) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6d_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6c_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6d_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6d_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6d_dwconv" padding="same" use_bias="False" groups="804">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6d_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6d_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage6d_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage6d_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>804</InputUnits>
+                <OutputUnits>201</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage6d_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage6d_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>201</InputUnits>
+                <OutputUnits>804</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage6d_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage6d_dwconv_swish stage6d_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage6d_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="134">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage6d_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 7 - First MBConv Block (134 -> 804 -> 230, stride=2) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7a_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage6d_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">2</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7a_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7a_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7a_dwconv" padding="same" use_bias="False" groups="804">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="804">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7a_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7a_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage7a_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage7a_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>804</InputUnits>
+                <OutputUnits>201</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7a_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage7a_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>201</InputUnits>
+                <OutputUnits>804</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage7a_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage7a_dwconv_swish stage7a_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7a_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="230">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7a_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 7 - Second MBConv Block (230 -> 1380 -> 230, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7b_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7a_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7b_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7b_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7b_dwconv" padding="same" use_bias="False" groups="1380">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7b_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7b_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage7b_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage7b_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1380</InputUnits>
+                <OutputUnits>345</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7b_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage7b_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>345</InputUnits>
+                <OutputUnits>1380</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage7b_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage7b_dwconv_swish stage7b_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7b_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="230">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7b_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 7 - Third MBConv Block (230 -> 1380 -> 230, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7c_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7b_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7c_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7c_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7c_dwconv" padding="same" use_bias="False" groups="1380">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7c_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7c_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage7c_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage7c_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1380</InputUnits>
+                <OutputUnits>345</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7c_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage7c_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>345</InputUnits>
+                <OutputUnits>1380</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage7c_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage7c_dwconv_swish stage7c_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7c_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="230">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7c_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 7 - Fourth MBConv Block (230 -> 1380 -> 230, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7d_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7c_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7d_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7d_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7d_dwconv" padding="same" use_bias="False" groups="1380">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7d_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7d_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage7d_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage7d_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1380</InputUnits>
+                <OutputUnits>345</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7d_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage7d_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>345</InputUnits>
+                <OutputUnits>1380</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage7d_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage7d_dwconv_swish stage7d_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7d_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="230">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7d_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 7 - Fifth MBConv Block (230 -> 1380 -> 230, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7e_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7d_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7e_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7e_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7e_dwconv" padding="same" use_bias="False" groups="1380">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">5</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7e_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7e_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage7e_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage7e_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1380</InputUnits>
+                <OutputUnits>345</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage7e_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage7e_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>345</InputUnits>
+                <OutputUnits>1380</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage7e_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage7e_dwconv_swish stage7e_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage7e_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="230">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage7e_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 8 - First and Only MBConv Block (230 -> 1380 -> 384, stride=1) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage8_expand" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage7e_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage8_expand_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage8_expand_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_expand_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage8_dwconv" padding="same" use_bias="False" groups="1380">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_expand_swish</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1380">
+                <KernelSize>
+                    <Array n="1" type="int">3</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage8_dwconv_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_dwconv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage8_dwconv_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_dwconv_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- SE Block -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="stage8_se_squeeze">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_dwconv_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer activation="linear" layerType="Dense" name="stage8_se_reduce" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_se_squeeze</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1380</InputUnits>
+                <OutputUnits>345</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage8_se_reduce_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_se_reduce</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <NetworkLayer activation="sigmoid" layerType="Dense" name="stage8_se_expand" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_se_reduce_swish</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>345</InputUnits>
+                <OutputUnits>1380</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Multiply" name="stage8_se_multiply">
+            <InboundNodes>
+                <Array n="2" type="string">stage8_dwconv_swish stage8_se_expand</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Project -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage8_project" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_se_multiply</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="384">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage8_project_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_project</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Stage 9 - Conv1D Block (384 -> 1536) -->
+        <NetworkLayer activation="linear" layerType="Conv1D" name="stage9_conv" padding="same" use_bias="False">
+            <InboundNodes>
+                <Array n="1" type="string">stage8_project_bn</Array>
+            </InboundNodes>
+            <ConvolutionalKernel channels="1536">
+                <KernelSize>
+                    <Array n="1" type="int">1</Array>
+                </KernelSize>
+                <KernelStride>
+                    <Array n="1" type="int">1</Array>
+                </KernelStride>
+            </ConvolutionalKernel>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="0.001" momentum="0.99" name="stage9_bn">
+            <InboundNodes>
+                <Array n="1" type="string">stage9_conv</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <NetworkLayer layerType="Activation" name="stage9_swish">
+            <InboundNodes>
+                <Array n="1" type="string">stage9_bn</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>swish</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- Adaptive Average Pooling -->
+        <NetworkLayer layerType="GlobalAveragePooling1D" name="avgpool">
+            <InboundNodes>
+                <Array n="1" type="string">stage9_swish</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Dropout -->
+        <NetworkLayer layerType="Dropout" name="dropout" dropoutRate="0.3">
+            <InboundNodes>
+                <Array n="1" type="string">avgpool</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- Fully Connected Layer 1 -->
+        <NetworkLayer activation="linear" layerType="Dense" name="linear1" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">dropout</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>1536</InputUnits>
+                <OutputUnits>256</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+
+        <!-- BatchNormalization -->
+        <NetworkLayer layerType="BatchNormalization" axis="1" center="True" epsilon="1e-05" momentum="0.1" name="bn1">
+            <InboundNodes>
+                <Array n="1" type="string">linear1</Array>
+            </InboundNodes>
+        </NetworkLayer>
+
+        <!-- ReLU Activation -->
+        <NetworkLayer layerType="Activation" name="relu1">
+            <InboundNodes>
+                <Array n="1" type="string">bn1</Array>
+            </InboundNodes>
+            <Activation>
+                <Type>ReLU</Type>
+            </Activation>
+        </NetworkLayer>
+
+        <!-- Fully Connected Layer 2 (Output Layer) -->
+        <NetworkLayer activation="linear" layerType="Dense" name="linear2" use_bias="True">
+            <InboundNodes>
+                <Array n="1" type="string">relu1</Array>
+            </InboundNodes>
+            <Dense>
+                <InputUnits>256</InputUnits>
+                <OutputUnits>1</OutputUnits>
+            </Dense>
+        </NetworkLayer>
+  </DeepNetwork>
+</PMML>
